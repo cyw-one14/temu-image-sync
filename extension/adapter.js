@@ -75,6 +75,7 @@
     async function sync({ source, expectedDetail, names, guard, progress, replace = false, interrupted = () => false }) {
       let ownedEditor = null;
       let ownedMaterial = null;
+      let ownedClear = null;
       const check = () => {
         guard();
         if (interrupted()) throw new Error("操作已暂停，请继续手动编辑，或关闭编辑器后重试同步。");
@@ -97,6 +98,23 @@
       function cancel(el) {
         if (el?.isConnected) button(el, "取消")?.click();
       }
+      async function discardEditor() {
+        if (!ownedEditor?.isConnected || interrupted()) return;
+        const panel = ownedEditor.closest('[data-testid="beast-core-modal"]');
+        const previous = new Set(all('[data-testid="beast-core-modal"]'));
+        cancel(panel);
+        const start = Date.now();
+        while (panel.isConnected && visible(panel) && !interrupted() && Date.now() - start < 1800) {
+          const prompt = all('[data-testid="beast-core-modal"]').find(el => !previous.has(el) && visible(el) &&
+            /^确认直接退出吗[？?]当前已填写内容将不会被保存/.test(text(el)));
+          if (prompt) {
+            const confirm = button(prompt, "确认");
+            if (confirm) confirm.click();
+            return;
+          }
+          await new Promise(resolve => setTimeout(resolve, 80));
+        }
+      }
       try {
         check();
         if (isBusy()) throw new Error("请先关闭正在使用的素材中心或编辑窗口。");
@@ -113,8 +131,19 @@
         if (rows.length) {
           // Only previously owned, unmodified image-only content reaches here.
           const clear = all("a", footer(ownedEditor)).find(el => text(el) === "清空");
+          const previous = new Set(all('[data-testid="beast-core-portal-main"]'));
           click(clear, "未找到详情清空入口，已保留原内容。");
-          await waitFor(() => editorEntries(ownedEditor).length === 0, "TEMU 要求手动确认清空，请确认后重新同步。", 1800);
+          const cleared = await waitFor(() => {
+            if (editorEntries(ownedEditor).length === 0) return true;
+            return all('[data-testid="beast-core-portal-main"]').find(el => !previous.has(el) && visible(el) &&
+              /^确认要清空吗[?？]$/.test(text(el.querySelector('[class*="PP_popoverContent"]'))));
+          }, "未识别到详情清空确认，已停止更新并保留原详情。", 3000);
+          if (cleared !== true) {
+            ownedClear = cleared;
+            click(button(ownedClear, "确认"), "未找到详情清空确认按钮，已停止更新。");
+            await waitFor(() => editorEntries(ownedEditor).length === 0, "详情内容未能清空，已停止更新并保留原详情。");
+            ownedClear = null;
+          }
         }
         for (let i = 0; i < source.length; i++) {
           check();
@@ -166,8 +195,9 @@
         return result;
       } catch (error) {
         if (!interrupted()) {
+          cancel(ownedClear);
           cancel(ownedMaterial);
-          if (ownedEditor?.isConnected) cancel(ownedEditor.closest('[data-testid="beast-core-modal"]'));
+          await discardEditor();
         }
         throw error;
       }

@@ -1,6 +1,6 @@
 {
   "name": "temu-image-sync",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "private": true,
   "description": "TEMU 商品轮播图同步到详情图文的本地浏览器扩展",
   "scripts": {

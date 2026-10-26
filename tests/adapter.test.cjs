@@ -11,7 +11,8 @@ const B = "https://img.kwcdn.com/product/fancy/b.jpg";
 const C = "https://img.kwcdn.com/product/fancy/c.jpg";
 const image = url => ({ url });
 
-function fixture({ source = [A, B], detail = [], manualText = "", materials = [A, B, C], onMaterialOpen } = {}) {
+function fixture({ source = [A, B], detail = [], manualText = "", materials = [A, B, C], onMaterialOpen,
+  clearConfirmation = false, discardConfirmation = false } = {}) {
   const dom = new JSDOM(`<!doctype html><body>
     <div id="materialMultiLanguages"><input type="checkbox" checked></div>
     <div id="productSkcList[0].carouselImgsI18n.common"></div>
@@ -22,11 +23,14 @@ function fixture({ source = [A, B], detail = [], manualText = "", materials = [A
   dom.window.Element.prototype.getClientRects = function () {
     return this.isConnected && !this.closest('[hidden], [style="display: none;"]') ? [{ width: 100, height: 100 }] : [];
   };
-  const calls = { publish: 0, draft: 0, saves: 0, cancels: 0, picks: [], searches: [] };
+  const calls = { publish: 0, draft: 0, saves: 0, cancels: 0, clearConfirms: 0, discardConfirms: 0, picks: [], searches: [] };
   doc.getElementById("publish").onclick = () => calls.publish++;
   doc.getElementById("draft").onclick = () => calls.draft++;
   const sourceField = doc.getElementById("productSkcList[0].carouselImgsI18n.common");
-  sourceField.innerHTML = source.map(url => `<img class="preview-image_img__test" src="${url}?imageMogr2/thumbnail/300x">`).join("");
+  function setSources(urls) {
+    sourceField.innerHTML = urls.map(url => `<img class="preview-image_img__test" src="${url}?imageMogr2/thumbnail/300x">`).join("");
+  }
+  setSources(source);
   function renderDetail(urls) {
     doc.querySelector(".preview_view__test").innerHTML = urls.map(url => `<div class="preview_item__test"><img src="${url}"></div>`).join("") +
       (manualText ? `<div class="preview_item__test"><p>${manualText}</p></div>` : "");
@@ -49,8 +53,24 @@ function fixture({ source = [A, B], detail = [], manualText = "", materials = [A
     renderComponents();
     const [save, cancel] = panel.querySelectorAll(".footer_footer__test button");
     save.onclick = () => { detail = [...components]; renderDetail(detail); calls.saves++; panel.remove(); };
-    cancel.onclick = () => { calls.cancels++; panel.remove(); };
-    panel.querySelector(".footer_footer__test a").onclick = () => { components.length = 0; renderComponents(); };
+    cancel.onclick = () => {
+      calls.cancels++;
+      if (!discardConfirmation) { panel.remove(); return; }
+      const prompt = modal("", '确认直接退出吗？当前已填写内容将不会被保存<button>确认</button><button>取消</button>');
+      prompt.querySelector("button").onclick = () => { calls.discardConfirms++; prompt.remove(); panel.remove(); };
+      prompt.querySelectorAll("button")[1].onclick = () => prompt.remove();
+    };
+    panel.querySelector(".footer_footer__test a").onclick = () => {
+      if (!clearConfirmation) { components.length = 0; renderComponents(); return; }
+      const popover = doc.createElement("div");
+      popover.setAttribute("data-testid", "beast-core-portal-main");
+      popover.innerHTML = `<div class="PP_popoverContent_test">${typeof clearConfirmation === "string" ? clearConfirmation : "确认要清空吗?"}</div><button>确认</button><button>取消</button>`;
+      doc.body.append(popover);
+      popover.querySelector("button").onclick = () => {
+        calls.clearConfirms++; components.length = 0; renderComponents(); popover.remove();
+      };
+      popover.querySelectorAll("button")[1].onclick = () => popover.remove();
+    };
     panel.querySelector(".side-left_sectionItem__test").onclick = () => {
       components.push(null);
       renderComponents();
@@ -91,7 +111,7 @@ function fixture({ source = [A, B], detail = [], manualText = "", materials = [A
     };
   }
   doc.querySelector(".decoration_preview__test button").onclick = openEditor;
-  return { dom, doc, calls, adapter: createAdapter(doc) };
+  return { dom, doc, calls, setSources, adapter: createAdapter(doc) };
 }
 
 async function run(f, extra = {}) {
@@ -145,6 +165,37 @@ test("verified owned image-only detail can be replaced, ignoring editor toolbar 
   t.after(() => f.dom.window.close());
   await run(f, { replace: true });
   assert.deepEqual(f.adapter.details().images.map(x => x.url), [B, A]);
+  assert.equal(f.calls.publish, 0);
+});
+
+test("owned details handle TEMU's clear popover before replacing images", async t => {
+  const f = fixture({ source: [B, A], detail: [A, B], clearConfirmation: true });
+  t.after(() => f.dom.window.close());
+  await run(f, { replace: true });
+  assert.equal(f.calls.clearConfirms, 1);
+  assert.deepEqual(f.adapter.details().images.map(x => x.url), [B, A]);
+  assert.equal(f.calls.saves, 1);
+  assert.equal(f.calls.publish, 0);
+  assert.equal(f.calls.draft, 0);
+});
+
+test("an unrelated confirmation is never accepted as permission to clear", async t => {
+  const f = fixture({ detail: [C], clearConfirmation: "确认提交吗?" });
+  t.after(() => f.dom.window.close());
+  await assert.rejects(run(f, { replace: true }), /未识别到详情清空确认/);
+  assert.equal(f.calls.clearConfirms, 0);
+  assert.equal(f.calls.saves, 0);
+  assert.deepEqual(f.adapter.details().images.map(x => x.url), [C]);
+});
+
+test("a failed replacement discards only its own scratch editor and preserves saved details", async t => {
+  const f = fixture({ detail: [C], materials: [C], clearConfirmation: true, discardConfirmation: true });
+  t.after(() => f.dom.window.close());
+  await assert.rejects(run(f, { replace: true }), /素材不在当前页/);
+  assert.equal(f.calls.discardConfirms, 1);
+  assert.equal(f.adapter.isBusy(), false);
+  assert.deepEqual(f.adapter.details().images.map(x => x.url), [C]);
+  assert.equal(f.calls.saves, 0);
   assert.equal(f.calls.publish, 0);
 });
 
@@ -235,6 +286,21 @@ test("controller automatically synchronizes a confirmed image list and does not 
   shadow.querySelector('[data-action="sync"]').click();
   await new Promise(resolve => setTimeout(resolve, 20));
   assert.equal(f.calls.saves, 1);
+});
+
+test("controller automatically follows image additions, deletions, and reorderings with clear confirmation", async t => {
+  const f = fixture({ clearConfirmation: true });
+  t.after(() => f.dom.window.close());
+  await loadContent(f);
+  await until(() => f.calls.saves === 1);
+  for (const [index, urls] of [[A, B, C], [A, C], [C, A]].entries()) {
+    f.setSources(urls);
+    await until(() => f.calls.saves === index + 2);
+    assert.deepEqual(f.adapter.details().images.map(x => x.url), urls);
+  }
+  assert.equal(f.calls.clearConfirms, 3);
+  assert.equal(f.calls.publish, 0);
+  assert.equal(f.calls.draft, 0);
 });
 
 test("controller protects existing manual content even on an explicit retry", async t => {

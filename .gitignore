@@ -1,0 +1,10 @@
+.env*
+.claude/settings.local.json
+.mcp.json
+.cursor/
+.codex/
+node_modules/
+coverage/
+artifacts/
+*.zip
+*.log

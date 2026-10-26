@@ -1,0 +1,12 @@
+{
+  "manifest_version": 3,
+  "name": "TEMU 商品图同步助手",
+  "version": "0.1.0",
+  "description": "在商品图确认后，将相同素材按顺序添加到英语详情图文。仅编辑当前表单，不提交商品发布。",
+  "permissions": ["storage"],
+  "content_scripts": [{
+    "matches": ["https://agentseller.temu.com/goods/*"],
+    "js": ["core.js", "adapter.js", "content.js"],
+    "run_at": "document_idle"
+  }]
+}

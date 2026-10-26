@@ -120,6 +120,45 @@ async function run(f, extra = {}) {
     names: new Map(), guard() {}, progress() {}, ...extra });
 }
 
+function extraSource(f, index, language, urls) {
+  const field = f.doc.createElement("div");
+  field.id = `productSkcList[${index}].carouselImgsI18n.${language}`;
+  field.innerHTML = urls.map(url => `<img class="preview-image_img__test" src="${url}">`).join("");
+  f.doc.body.append(field);
+  return field;
+}
+
+function languageFixture(f, { active = "西班牙语", mode = "inherit" } = {}) {
+  const { doc } = f;
+  const tabs = doc.createElement("div");
+  tabs.setAttribute("data-testid", "beast-core-tab");
+  tabs.innerHTML = '<div data-testid="beast-core-tab-itemLabel-wrapper">英语</div><div data-testid="beast-core-tab-itemLabel-wrapper">西班牙语<span>自定义</span></div>';
+  doc.body.append(tabs);
+  const config = doc.createElement("div");
+  config.className = "decoration-i18n-config_container__test";
+  config.innerHTML = `<label data-testid="beast-core-radio" data-checked="${mode === "inherit"}"><input type="radio" ${mode === "inherit" ? "checked" : ""}>使用英语图片素材</label><label data-testid="beast-core-radio" data-checked="${mode === "none"}"><input type="radio" ${mode === "none" ? "checked" : ""}>不使用任何详情图文素材</label>`;
+  doc.body.append(config);
+  let radioChanges = 0;
+  config.addEventListener("click", () => radioChanges++);
+  const preview = doc.querySelector(".decoration_preview__test");
+  function select(label) {
+    tabs.querySelectorAll('[data-testid="beast-core-tab-itemLabel-wrapper"]').forEach((item, index) => {
+      item.className = (index === 0 ? "英语" : "西班牙语") === label ? "TAB_active_test" : "";
+    });
+    preview.hidden = label !== "英语";
+    config.hidden = label === "英语";
+  }
+  tabs.querySelectorAll('[data-testid="beast-core-tab-itemLabel-wrapper"]').forEach((item, index) => {
+    item.onclick = () => select(index === 0 ? "英语" : "西班牙语");
+  });
+  const checkbox = doc.createElement("input");
+  checkbox.type = "checkbox";
+  checkbox.checked = true;
+  doc.getElementById("materialMultiLanguages").append(checkbox);
+  select(active);
+  return { select, config, tabs, get radioChanges() { return radioChanges; } };
+}
+
 test("inserts the exact assets in source order, saves only decoration, never publishes", async t => {
   const f = fixture({ source: [B, A] });
   t.after(() => f.dom.window.close());
@@ -229,19 +268,20 @@ test("user intervention stops automation and leaves their open editor intact", a
   assert.equal(f.adapter.isBusy(), true);
 });
 
-test("multiple color/language variants are detected instead of mixed together", t => {
-  const f = fixture();
+test("all English color rows merge in page order while other language images remain separate", t => {
+  const f = fixture({ source: [B, A] });
   t.after(() => f.dom.window.close());
-  const field = f.doc.getElementById("productSkcList[0].carouselImgsI18n.common").cloneNode(true);
-  field.id = "productSkcList[1].carouselImgsI18n.common";
-  f.doc.body.append(field);
-  assert.match(f.adapter.sources().unsupported, /一个颜色规格/);
-  field.remove();
+  extraSource(f, 1, "common", [A, C]);
+  extraSource(f, 0, "es", [C]);
+  assert.equal(f.adapter.sources().unsupported, null);
+  assert.equal(f.adapter.sources().variantCount, 2);
+  assert.deepEqual(f.adapter.sources().images.map(x => x.url), [B, A, C]);
   const language = f.doc.createElement("input");
   language.type = "checkbox";
   language.checked = true;
   f.doc.getElementById("materialMultiLanguages").append(language);
-  assert.match(f.adapter.sources().unsupported, /英语素材/);
+  assert.equal(f.adapter.sources().languageCount, 2);
+  assert.deepEqual(f.adapter.sources().images.map(x => x.url), [B, A, C]);
 });
 
 test("extension privileges cover only seller editing pages and local settings", () => {
@@ -334,4 +374,144 @@ test("turning automatic mode off cancels work that is only scheduled", async t =
   await new Promise(resolve => setTimeout(resolve, 1850));
   assert.equal(f.calls.saves, 0);
   assert.deepEqual(f.calls.picks, []);
+});
+
+test("multiple colors automatically merge and adding, changing or removing a second color updates owned details", async t => {
+  const f = fixture({ source: [A], clearConfirmation: true });
+  t.after(() => f.dom.window.close());
+  const second = extraSource(f, 1, "common", [B, A]);
+  await loadContent(f);
+  await until(() => f.calls.saves === 1);
+  assert.deepEqual(f.adapter.details().images.map(x => x.url), [A, B]);
+  second.innerHTML = `<img class="preview-image_img_test" src="${C}"><img class="preview-image_img_test" src="${A}">`;
+  await until(() => f.calls.saves === 2);
+  assert.deepEqual(f.adapter.details().images.map(x => x.url), [A, C]);
+  second.remove();
+  await until(() => f.calls.saves === 3);
+  assert.deepEqual(f.adapter.details().images.map(x => x.url), [A]);
+  extraSource(f, 1, "common", [B]);
+  await until(() => f.calls.saves === 4);
+  assert.deepEqual(f.adapter.details().images.map(x => x.url), [A, B]);
+  assert.equal(f.calls.publish, 0);
+  assert.equal(f.calls.draft, 0);
+});
+
+for (const mode of ["inherit", "none"]) {
+  test(`while viewing a non-English page, sync English and preserve its ${mode} setting and tab`, async t => {
+    const f = fixture({ source: [B, A] });
+    t.after(() => f.dom.window.close());
+    const languages = languageFixture(f, { mode });
+    extraSource(f, 0, "es", [C]);
+    const { shadow } = await loadContent(f);
+    await until(() => f.calls.saves === 1 && f.adapter.detailLanguage().label === "西班牙语");
+    assert.equal(f.adapter.detailLanguage().mode, mode);
+    assert.equal(languages.radioChanges, 0);
+    assert.deepEqual(f.calls.picks, [B, A]);
+    assert.equal(f.calls.publish, 0);
+    assert.equal(f.calls.draft, 0);
+    assert.match(shadow.querySelector(".status").textContent, /已同步 2 张/);
+    shadow.querySelector('[data-action="retry"]').click();
+    await new Promise(resolve => setTimeout(resolve, 1800));
+    assert.equal(f.calls.saves, 1);
+  });
+}
+
+test("manual English details stay protected when automatic work starts on a Spanish tab", async t => {
+  const f = fixture({ source: [A], detail: [C] });
+  t.after(() => f.dom.window.close());
+  const languages = languageFixture(f);
+  const { shadow } = await loadContent(f);
+  await until(() => /已有手动内容/.test(shadow.querySelector(".status").textContent) && f.adapter.detailLanguage().label === "西班牙语");
+  assert.equal(f.calls.saves, 0);
+  assert.equal(languages.radioChanges, 0);
+  assert.equal(f.calls.publish, 0);
+  languages.select("英语");
+  assert.deepEqual(f.adapter.details().images.map(x => x.url), [C]);
+});
+
+test("changing the detail language during insertion stops before saving", async t => {
+  let languages;
+  const f = fixture({ source: [A], onMaterialOpen() { languages.select("西班牙语"); } });
+  t.after(() => f.dom.window.close());
+  languages = languageFixture(f, { active: "英语" });
+  await assert.rejects(run(f), /详情语言已切换/);
+  assert.equal(f.calls.saves, 0);
+  assert.equal(f.calls.publish, 0);
+});
+
+test("a missing English detail tab never writes to the current non-English page", async t => {
+  const f = fixture({ source: [A] });
+  t.after(() => f.dom.window.close());
+  const languages = languageFixture(f);
+  languages.tabs.firstElementChild.remove();
+  const { shadow } = await loadContent(f);
+  await until(() => /未找到英语详情标签/.test(shadow.querySelector(".status").textContent));
+  assert.equal(f.calls.saves, 0);
+  assert.equal(languages.radioChanges, 0);
+});
+
+test("sorting placeholders defer synchronization until the drag finishes", async t => {
+  const f = fixture({ source: [A] });
+  t.after(() => f.dom.window.close());
+  const img = f.doc.querySelector('img[class*="preview-image_img"]');
+  const placeholder = f.doc.createElement("div");
+  placeholder.className = "beast-sortable-item";
+  placeholder.style.opacity = "0";
+  img.replaceWith(placeholder);
+  placeholder.append(img);
+  const { shadow } = await loadContent(f);
+  assert.match(shadow.querySelector(".status").textContent, /等待商品图拖动完成/);
+  await new Promise(resolve => setTimeout(resolve, 1800));
+  assert.equal(f.calls.saves, 0);
+  placeholder.style.opacity = "";
+  await until(() => f.calls.saves === 1);
+  assert.equal(f.calls.publish, 0);
+});
+
+test("only localized carousel images do not get copied into English details", async t => {
+  const f = fixture({ source: [] });
+  t.after(() => f.dom.window.close());
+  languageFixture(f);
+  extraSource(f, 0, "es", [C]);
+  const { shadow } = await loadContent(f);
+  await new Promise(resolve => setTimeout(resolve, 1800));
+  assert.match(shadow.querySelector(".status").textContent, /选择英语轮播图/);
+  assert.equal(f.calls.saves, 0);
+  assert.deepEqual(f.calls.picks, []);
+});
+
+test("legacy 0.1.1 ownership records permit a multi-color update without taking over manual details", async t => {
+  const f = fixture({ source: [A], detail: [A], clearConfirmation: true });
+  t.after(() => f.dom.window.close());
+  const lastWrite = f.adapter.details().fingerprint;
+  extraSource(f, 1, "common", [B]);
+  await loadContent(f, { "draft:https://agentseller.temu.com/goods/edit?productDraftId=123": {
+    names: [], lastWrite, updatedAt: Date.now()
+  } });
+  await until(() => f.calls.saves === 1);
+  assert.deepEqual(f.adapter.details().images.map(x => x.url), [A, B]);
+  assert.equal(f.calls.publish, 0);
+});
+
+test("language switching waits for a remounting English detail form before opening its editor", async t => {
+  const f = fixture({ source: [A, B] });
+  t.after(() => f.dom.window.close());
+  const languages = languageFixture(f);
+  const originalPreview = f.doc.querySelector('.decoration_preview__test');
+  const englishTab = languages.tabs.firstElementChild;
+  const select = englishTab.onclick;
+  englishTab.onclick = () => {
+    select();
+    f.dom.window.setTimeout(() => {
+      const replacement = originalPreview.cloneNode(true);
+      replacement.querySelector('button').onclick = originalPreview.querySelector('button').onclick;
+      originalPreview.replaceWith(replacement);
+    }, 150);
+  };
+  await f.adapter.selectDetailLanguage('英语');
+  assert.equal(originalPreview.isConnected, false);
+  await run(f);
+  assert.equal(f.calls.saves, 1);
+  assert.deepEqual(f.adapter.details().images.map(x => x.url), [A, B]);
+  assert.equal(f.calls.publish, 0);
 });

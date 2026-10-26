@@ -5,7 +5,7 @@
   function createAdapter(doc) {
     const text = el => (el?.textContent || "").replace(/\s+/g, "").trim();
     const visible = el => Boolean(el?.isConnected && el.getClientRects().length);
-    const all = (selector, parent = doc) => Array.from(parent.querySelectorAll(selector));
+    const all = (selector, parent = doc) => Array.from(parent?.querySelectorAll(selector) || []);
     const button = (parent, label) => all("button", parent).find(el => text(el) === label && visible(el) && !el.disabled);
     const footer = editor => editor.closest('[data-testid="beast-core-modal"]').querySelector('[class*="footer_footer"]');
     const editor = () => all('[class*="editor_editor"]').find(visible) || null;
@@ -15,16 +15,73 @@
     function sources() {
       const fields = all('[id^="productSkcList["]').filter(el => /\.carouselImgsI18n\.common$/.test(el.id));
       const languages = doc.getElementById("materialMultiLanguages");
-      let unsupported = null;
-      if (fields.length > 1) unsupported = "当前版本仅适配一个颜色规格，请先使用单规格测试商品。";
-      if (languages && languages.querySelectorAll('input[type="checkbox"]:checked').length > 1) {
-        unsupported = "当前版本仅适配英语素材，请先使用单语言测试商品。";
-      }
       const field = fields[0];
-      const images = field ? Core.uniqueImages(all('img[class*="preview-image_img"]', field).map(img => ({
+      const images = Core.uniqueImages(fields.flatMap(item => all('img[class*="preview-image_img"]', item)).map(img => ({
         url: img.src.split("?")[0]
-      }))) : [];
-      return { field, images, unsupported };
+      })));
+      const sorting = fields.some(item => all('.beast-sortable-item', item).some(el => el.style.opacity === "0"));
+      const languageCount = Math.max(1, languages?.querySelectorAll('input[type="checkbox"]:checked').length || 0);
+      return { field, fields, images, unsupported: null, sorting, variantCount: fields.length, languageCount };
+    }
+
+    const languageLabel = el => /^(英语|西班牙语|法语|阿拉伯语|韩语)/.exec(text(el))?.[0] || null;
+    function detailTabs() {
+      return all('[data-testid="beast-core-tab"]').find(tab =>
+        all('[data-testid="beast-core-tab-itemLabel-wrapper"]', tab).some(el => languageLabel(el) === "英语"));
+    }
+
+    function detailLanguage() {
+      const tab = detailTabs();
+      const active = tab && all('[data-testid="beast-core-tab-itemLabel-wrapper"]', tab).find(el => /\bTAB_active_/.test(el.className));
+      const label = tab ? languageLabel(active) : "英语";
+      const preview = all('[class*="decoration_preview"]').find(visible);
+      if (label === "英语") return { label, mode: preview ? "editor" : "loading" };
+      const config = all('[class*="decoration-i18n-config_container"]').find(visible);
+      const choice = all('[data-testid="beast-core-radio"]', config).find(el =>
+        el.getAttribute("data-checked") === "true" || el.querySelector('input[type="radio"]')?.checked);
+      const value = text(choice);
+      const mode = value === "使用英语图片素材" ? "inherit" : value === "不使用任何详情图文素材" ? "none" : "unknown";
+      return { label, mode };
+    }
+
+    async function selectDetailLanguage(label, guard = () => {}) {
+      guard();
+      if (isBusy()) throw new Error("请先关闭素材中心或装修窗口，再切换详情语言。");
+      const initial = detailLanguage();
+      const changed = initial.label !== label || initial.mode === "loading";
+      if (!changed && ["editor", "inherit", "none"].includes(initial.mode)) return initial;
+      if (changed) {
+        const tab = detailTabs();
+        const target = all('[data-testid="beast-core-tab-itemLabel-wrapper"]', tab).find(el => languageLabel(el) === label && visible(el));
+        if (!target) throw new Error(`未找到${label}详情标签，已停止同步。`);
+        target.click();
+      }
+      const start = Date.now();
+      let stableSince = start;
+      let previousRoot = null;
+      let previousFingerprint = null;
+      for (;;) {
+        guard();
+        const current = detailLanguage();
+        if (current.label === label && ["editor", "inherit", "none"].includes(current.mode)) {
+          const detail = label === "英语" ? details() : null;
+          const currentRoot = detail?.root || all('[class*="decoration-i18n-config_container"]').find(visible);
+          const fingerprint = detail?.fingerprint || current.mode;
+          if (currentRoot !== previousRoot || fingerprint !== previousFingerprint) {
+            previousRoot = currentRoot;
+            previousFingerprint = fingerprint;
+            stableSince = Date.now();
+          }
+          // The tab highlight can change before its detail form has finished remounting.
+          if (currentRoot && Date.now() - stableSince >= 650) return current;
+        } else {
+          previousRoot = null;
+          previousFingerprint = null;
+          stableSince = Date.now();
+        }
+        if (Date.now() - start > 5000) throw new Error("详情语言页未能加载，已停止同步。");
+        await new Promise(resolve => setTimeout(resolve, 80));
+      }
     }
 
     function entries(container, selector) {
@@ -35,7 +92,7 @@
     }
 
     function details() {
-      const preview = doc.querySelector('[class*="decoration_preview"]');
+      const preview = all('[class*="decoration_preview"]').find(visible) || null;
       const rows = preview ? entries(preview, '[class*="preview_item"]') : [];
       return {
         root: preview,
@@ -79,6 +136,7 @@
       const check = () => {
         guard();
         if (interrupted()) throw new Error("操作已暂停，请继续手动编辑，或关闭编辑器后重试同步。");
+        if (detailLanguage().label !== "英语") throw new Error("详情语言已切换，已停止同步，避免写入其他语言。");
       };
       async function waitFor(read, message, timeout = 12000) {
         const start = Date.now();
@@ -119,6 +177,7 @@
         check();
         if (isBusy()) throw new Error("请先关闭正在使用的素材中心或编辑窗口。");
         const before = details();
+        if (!before.root) throw new Error("未找到英语详情装修入口，已停止同步。");
         if (before.foreign || before.fingerprint !== expectedDetail) throw new Error("详情内容已发生变化，已保留现有内容，请检查后重试。");
         if (before.images.length && !replace) throw new Error("详情已存在图片，已暂停自动覆盖。");
         progress("正在打开详情装修…");
@@ -203,7 +262,7 @@
       }
     }
 
-    return { sources, details, isBusy, rememberMaterials, sync };
+    return { sources, details, detailLanguage, selectDetailLanguage, isBusy, rememberMaterials, sync };
   }
 
   const api = Object.freeze({ createAdapter });

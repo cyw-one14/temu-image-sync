@@ -15,11 +15,12 @@
       .heading{display:flex;align-items:center;justify-content:space-between;font-size:15px;font-weight:650}.badge{font-size:11px;color:#6b7789;font-weight:400}.toggle{display:flex;align-items:center;gap:7px;margin-top:12px;cursor:pointer}input{accent-color:#216ce7;width:16px;height:16px}.status{margin:12px 0 8px;min-height:40px;white-space:pre-wrap;overflow-wrap:anywhere}.hint{color:#7a8798;font-size:11px}.actions{display:flex;gap:7px;margin-top:12px}button{font:inherit;cursor:pointer;border:1px solid #cdd6e3;border-radius:7px;padding:5px 10px;background:#fff;color:#314359}button.primary{background:#216ce7;border-color:#216ce7;color:white}button:disabled{opacity:.5;cursor:default}.min{border:0;padding:0 4px;background:transparent;color:#64748b}.collapsed .body{display:none}.collapsed{width:180px}.error{color:#b04120}
     </style>
     <section class="panel" aria-label="TEMU 商品图同步助手">
-      <div class="heading"><span>商品图同步助手</span><button class="min" aria-label="收起面板">－</button></div>
+      <div class="heading"><span>商品图同步助手 <span class="badge">0.2.1</span></span><button class="min" aria-label="收起面板">－</button></div>
       <div class="body">
         <label class="toggle"><input type="checkbox" checked>商品图确认后自动同步详情</label>
+        <div class="summary hint" style="margin-top:8px"></div>
         <div class="status" role="status" aria-live="polite">正在识别商品图片…</div>
-        <div class="hint">当前版本：单颜色规格 · 英语详情<br>只保存详情装修，商品草稿和发布由你控制。</div>
+        <div class="hint">各颜色英语图片按顺序合并去重。<br>其他语言详情遵循 TEMU 的继承设置。<br>只保存详情装修，商品草稿和发布由你控制。</div>
         <div class="actions"><button class="primary" data-action="sync">立即同步</button><button data-action="retry">重新检查</button></div>
       </div>
     </section>`;
@@ -27,6 +28,7 @@
   const status = shadow.querySelector(".status");
   const toggle = shadow.querySelector('input[type="checkbox"]');
   const syncButton = shadow.querySelector('[data-action="sync"]');
+  const summary = shadow.querySelector(".summary");
   let draft = null;
   let ready = false;
   let running = false;
@@ -37,6 +39,7 @@
   let scheduled = null;
   let loadSerial = 0;
   let currentSignature = "";
+  let verifiedSignature = null;
   let lastTyping = 0;
 
   function show(message, error = false) {
@@ -44,6 +47,12 @@
     status.classList.toggle("error", error);
   }
   function recordKey() { return `draft:${draft}`; }
+  function updateSummary(source) {
+    const language = adapter.detailLanguage();
+    const mode = language.mode === "inherit" ? "沿用英语详情" : language.mode === "none" ? "不使用详情，保持设置" : language.mode === "editor" ? "英语详情同步" : "等待语言页加载";
+    const value = `${source.variantCount} 个颜色 · ${source.languageCount} 个素材语种\n${language.label || "等待语言页面"}：${mode}`;
+    if (summary.textContent !== value) summary.textContent = value;
+  }
   async function saveRecord() {
     if (!draft) return;
     await storage.set({ [recordKey()]: { names: Array.from(names), lastWrite, updatedAt: Date.now() } });
@@ -56,6 +65,7 @@
     lastWrite = null;
     failedSignature = null;
     currentSignature = "";
+    verifiedSignature = null;
     if (!draft) return;
     try {
       const data = await storage.get(recordKey());
@@ -74,26 +84,34 @@
     if (next !== draft) { scope.update(next, []); void loadDraft(next); return; }
     if (!ready || !draft || running) return;
     const source = adapter.sources();
+    updateSummary(source);
     const sig = Core.signature(source.images);
     scope.update(draft, source.images);
     if (source.unsupported) { show(source.unsupported, true); syncButton.disabled = true; return; }
-    syncButton.disabled = !source.images.length;
+    syncButton.disabled = !source.images.length || source.sorting;
     if (sig !== currentSignature) {
       currentSignature = sig;
+      verifiedSignature = null;
       failedSignature = null;
       clearTimeout(scheduled);
       scheduled = null;
     }
-    if (!source.images.length) { show("等待你在商品规格中选择轮播图。"); return; }
-    const detail = adapter.details();
-    if (!detail.foreign && Core.assetSignature(detail.images) === Core.assetSignature(source.images)) {
-      show(`已同步 ${source.images.length} 张 · 图片与顺序一致`);
-      return;
+    if (source.sorting) { clearTimeout(scheduled); scheduled = null; show("等待商品图拖动完成…"); return; }
+    if (!source.images.length) { show("等待你在商品规格中选择英语轮播图。"); return; }
+    const language = adapter.detailLanguage();
+    if (language.label === "英语" && language.mode === "editor") {
+      const detail = adapter.details();
+      if (!detail.foreign && Core.assetSignature(detail.images) === Core.assetSignature(source.images)) {
+        verifiedSignature = sig;
+      } else {
+        verifiedSignature = null;
+        if (detail.foreign || (detail.images.length && detail.fingerprint !== lastWrite)) {
+          show("详情已有手动内容，已保留。请先检查详情，清空后可重新同步。", true);
+          return;
+        }
+      }
     }
-    if (detail.foreign || (detail.images.length && detail.fingerprint !== lastWrite)) {
-      show("详情已有手动内容，已保留。请先检查详情，清空后可重新同步。", true);
-      return;
-    }
+    if (verifiedSignature === sig) { show(`已同步 ${source.images.length} 张 · 图片与顺序一致`); return; }
     if (failedSignature === sig) return;
     show(`已识别 ${source.images.length} 张商品图${toggle.checked ? "，等待同步…" : "，自动同步已关闭。"}`);
     if (!toggle.checked || adapter.isBusy() || scheduled) return;
@@ -108,15 +126,10 @@
     if (running || !ready || !draft) return;
     const source = adapter.sources();
     if (source.unsupported) { show(source.unsupported, true); return; }
-    if (!source.images.length) { show("请先添加商品轮播图。"); return; }
+    if (!source.images.length) { show("请先添加英语商品轮播图。"); return; }
+    if (source.sorting) { show("等待商品图拖动完成…"); return; }
     if (adapter.isBusy()) { show("请先完成或关闭当前窗口，随后重新同步。"); return; }
-    const detail = adapter.details();
-    if (!detail.foreign && Core.assetSignature(detail.images) === Core.assetSignature(source.images)) {
-      show(`已同步 ${source.images.length} 张 · 无需重复添加`); return;
-    }
-    if (detail.foreign || (detail.images.length && detail.fingerprint !== lastWrite)) {
-      show("详情已有手动内容，已保留。请先检查详情，清空后可重新同步。", true); return;
-    }
+    const previousLanguage = adapter.detailLanguage().label;
     const ticket = scope.update(draft, source.images);
     const runDraft = draft;
     const runNames = names;
@@ -124,23 +137,43 @@
     userIntervened = false;
     syncButton.disabled = true;
     function guard() {
-      scope.update(Core.getDraftKey(location.href), adapter.sources().images);
+      const current = adapter.sources();
+      scope.update(Core.getDraftKey(location.href), current.images);
       if (!scope.isCurrent(ticket)) throw new Error("商品或图片已变化，已暂停本次同步。请重新检查。");
+      if (current.sorting) throw new Error("商品图正在拖动排序，已暂停本次同步。");
     }
     try {
+      show(previousLanguage && previousLanguage !== "英语" ? "正在切换至英语详情，其他语言设置会保留…" : "正在检查英语详情…");
+      await adapter.selectDetailLanguage("英语", guard);
+      const detail = adapter.details();
+      if (!detail.root) throw new Error("未找到英语详情预览，已停止同步。");
+      if (!detail.foreign && Core.assetSignature(detail.images) === Core.assetSignature(source.images)) {
+        verifiedSignature = Core.signature(source.images);
+        show(`已同步 ${source.images.length} 张 · 无需重复添加`);
+        return;
+      }
+      if (detail.foreign || (detail.images.length && detail.fingerprint !== lastWrite)) {
+        throw new Error("详情已有手动内容，已保留。请先检查详情，清空后可重新同步。");
+      }
       const result = await adapter.sync({ source: source.images, expectedDetail: detail.fingerprint,
         names: runNames, guard, progress: show, replace: Boolean(detail.images.length), interrupted: () => userIntervened });
       guard();
       if (draft !== runDraft) return;
       lastWrite = result.fingerprint;
+      verifiedSignature = Core.signature(source.images);
       await saveRecord();
       show(`已同步 ${source.images.length} 张 · 图片与顺序一致`);
     } catch (error) {
       failedSignature = Core.signature(source.images);
       show(error.message || "同步未完成，请检查 TEMU 页面。", true);
     } finally {
+      if (previousLanguage && previousLanguage !== "英语" && !userIntervened && scope.isCurrent(ticket) && !adapter.isBusy()) {
+        try { await adapter.selectDetailLanguage(previousLanguage, guard); }
+        catch { show("英语详情处理完成，原语言标签未能恢复，请手动检查当前页面。", true); }
+      }
       running = false;
       syncButton.disabled = false;
+      updateSummary(adapter.sources());
     }
   }
 
@@ -170,7 +203,7 @@
     clearTimeout(scanTimer);
     scanTimer = setTimeout(scan, 200);
   });
-  observer.observe(document.body, { childList: true, subtree: true, attributes: true, attributeFilter: ["src"] });
+  observer.observe(document.body, { childList: true, subtree: true, attributes: true, attributeFilter: ["src", "class", "style", "data-checked"] });
   // SPA navigation or a closed modal may not change an image attribute.
   setInterval(scan, 2000);
   void storage.get("autoSync").then(result => {
